@@ -31,8 +31,16 @@ $sdk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Directory
   Where-Object { $_.Name -match '^10\.' } | Sort-Object Name -Descending | Select-Object -First 1
 if (-not $sdk) { throw "No Windows 10/11 SDK found under Windows Kits\10\Include." }
 
+# Both the SDK and the v143 compiler minor version float with whatever the machine has, so they are
+# recorded in BUILDINFO.txt below - a binary that crashes must be traceable back to what built it.
+$vsPath = & $vswhere -latest -products * -property installationPath | Select-Object -First 1
+$vsVer = & $vswhere -latest -products * -property catalog_productDisplayVersion | Select-Object -First 1
+$vcToolsFile = "$vsPath\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt"
+$vcTools = if (Test-Path $vcToolsFile) { (Get-Content $vcToolsFile -Raw).Trim() } else { "unknown" }
+
 Write-Host "MSBuild: $msbuild"
 Write-Host "SDK:     $($sdk.Name)"
+Write-Host "MSVC:    $vcTools (VS $vsVer)"
 
 & $msbuild "$root\MetinPythonLib\MetinPythonLib.vcxproj" `
   /t:Rebuild `
@@ -42,8 +50,37 @@ Write-Host "SDK:     $($sdk.Name)"
   /p:WholeProgramOptimization=false `
   /v:minimal /nologo
 
-if ($LASTEXITCODE -eq 0) {
-  Write-Host "`nBuilt: $root\build\eXLib.dll" -ForegroundColor Green
-} else {
-  throw "Build failed (exit $LASTEXITCODE)"
+if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)" }
+
+# Provenance record. The SHA256s are the point: hash a deployed eXLib.mix and you know exactly
+# which build it came from, without guessing from timestamps.
+$commit = try { (git -C $root rev-parse HEAD 2>$null).Trim() } catch { "unknown" }
+$dirty = try { if ((git -C $root status --porcelain 2>$null)) { "dirty" } else { "clean" } } catch { "unknown" }
+$describe = try { (git -C $root describe --tags --always 2>$null).Trim() } catch { "unknown" }
+
+$lines = @(
+  "eXLib build provenance",
+  "======================",
+  "built (UTC):      $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))",
+  "git commit:       $commit ($dirty)",
+  "git describe:     $describe",
+  "",
+  "toolchain",
+  "  VS version:     $vsVer",
+  "  MSVC toolset:   $vcTools",
+  "  PlatformToolset: v143",
+  "  Windows SDK:    $($sdk.Name)",
+  "",
+  "artifacts"
+)
+foreach ($f in @("eXLib.dll", "eXLib.pdb")) {
+  $p = "$root\build\$f"
+  if (Test-Path $p) {
+    $h = (Get-FileHash $p -Algorithm SHA256).Hash
+    $lines += "  {0,-10} sha256={1} size={2}" -f $f, $h, (Get-Item $p).Length
+  }
 }
+$lines | Set-Content "$root\build\BUILDINFO.txt" -Encoding UTF8
+
+Write-Host "`nBuilt: $root\build\eXLib.dll" -ForegroundColor Green
+Get-Content "$root\build\BUILDINFO.txt" | Write-Host

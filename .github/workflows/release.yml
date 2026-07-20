@@ -71,3 +71,4 @@ jobs:
           files: |
             build/eXLib.dll
             build/eXLib.pdb
+            build/BUILDINFO.txt
